@@ -57,8 +57,6 @@
             
             const [availableTeachers, setAvailableTeachers] = useState([]);
             const [availableStudents, setAvailableStudents] = useState([]);
-            // 新增：用來記錄每個學生的多種寫法（別名庫）
-            const [studentAliases, setStudentAliases] = useState({});
             
             const [selectedTeacher, setSelectedTeacher] = useState('');
             const [selectedStudents, setSelectedStudents] = useState([]);
@@ -130,6 +128,7 @@
                     return;
                 }
 
+                // 修改：支援抓取所有負責老師與治療師
                 let teachers = headers.slice(2)
                                       .map(h => String(h).trim())
                                       .filter(h => {
@@ -142,6 +141,7 @@
                 
                 teachers = [...new Set(teachers)];
 
+                // 自訂排序邏輯：SCCW -> ST -> OT -> PT -> SW
                 const getTeacherRank = (name) => {
                     const clean = name.toUpperCase().replace(/[\s\n\r　]+/g, '');
                     if (clean.includes('SCCW')) return 1;
@@ -158,99 +158,39 @@
                     const rankA = getTeacherRank(a);
                     const rankB = getTeacherRank(b);
                     if (rankA !== rankB) return rankA - rankB;
-                    return a.localeCompare(b); 
+                    return a.localeCompare(b); // 同類型按字母排序
                 });
 
                 setAvailableTeachers(teachers);
 
+                let sSet = new Set();
                 const ignoredKeywords = ['ST','OT','PT','SCCW','SSCCW','SW','YAN','小組','家長','觀課','請假','ABS','(高)','(陳)','(李)','(敖)','(勞)','(魯)','(張)','(何)', '斑馬', '猴子', '青蛙', '海豚', '熊貓', '獅子', '企鵝', '大象', '長頸鹿', '白兔', '河馬', '松鼠', 'XXX', '小小運動會', '組'];
                 
-                // --- 智能合併引擎 (Rosetta Stone) 開始 ---
-                let allCellStrings = [];
                 for (let i = headerRowIndex + 1; i < data.length; i++) {
                     const row = data[i];
-                    if (!row) continue;
+                    if (!row || row.length === 0) continue;
                     for (let col = 2; col < headers.length; col++) {
-                        if (row[col]) {
-                            let cleanStr = String(row[col]).replace(/[\(（\[【]?(補課|補)[\)）\]】]?/g, '').replace(/\*/g, '').toUpperCase();
-                            allCellStrings.push(cleanStr);
-                        }
+                        const cellValueRaw = row[col];
+                        if (!cellValueRaw) continue;
+                        
+                        let cleanStr = String(cellValueRaw).replace(/[\(（\[【]?(補課|補)[\)）\]】]?/g, '').replace(/\*/g, '').toUpperCase();
+                        let parts = cleanStr.split(/[\s\n/、,+　]+/);
+                        
+                        parts.forEach(p => {
+                            let name = p.trim();
+                            if (name.length >= 2 && !name.match(/^[0-9:.\-]+$/) && !name.match(/^S\d+$/i) && !ignoredKeywords.some(ig => name.includes(ig))) {
+                                sSet.add(name);
+                            }
+                        });
                     }
                 }
-
-                let aliasToCombo = {}; 
-                let comboToAliases = {};
-
-                // 第一階段：尋找中英混合的名字並建立關聯庫
-                allCellStrings.forEach(str => {
-                    // 只用換行、逗號來分割（保留空格和斜線以偵測中英組合）
-                    let chunks = str.split(/[\n、,+　]+/).map(c => c.trim()).filter(c => c);
-                    
-                    chunks.forEach(chunk => {
-                        let cleanChunk = chunk;
-                        ignoredKeywords.forEach(ig => { cleanChunk = cleanChunk.replace(new RegExp(ig, 'g'), ''); });
-                        
-                        let zhMatch = cleanChunk.match(/[\u4e00-\u9fa5]{2,}/); // 至少兩位中文
-                        let enMatches = cleanChunk.match(/[A-Z]{2,}/g); // 至少兩位英文
-                        let validEn = null;
-                        
-                        if (enMatches) {
-                            // 確保配對到的英文不是治療師簡稱
-                            validEn = enMatches.find(e => !['OT','ST','PT','SW','ABS'].includes(e));
-                        }
-                        
-                        if (zhMatch && validEn) {
-                            let zh = zhMatch[0];
-                            let en = validEn;
-                            let displayName = `${zh} ${en}`; // 建立標準名字: 例如 "林明 TAKLIM"
-                            
-                            aliasToCombo[zh] = displayName;
-                            aliasToCombo[en] = displayName;
-                            
-                            if (!comboToAliases[displayName]) {
-                                comboToAliases[displayName] = new Set([zh, en, displayName, displayName.replace(' ', '')]);
-                            }
-                            // 把原本的字串去空白後也加入別名庫 (涵蓋 林明TAKLIM 這種無空白寫法)
-                            comboToAliases[displayName].add(cleanChunk.replace(/\s+|\//g, ''));
-                        }
-                    });
-                });
-
-                let finalStudentsSet = new Set();
-                let finalAliasesMap = {};
                 
-                for(let key in comboToAliases) {
-                    finalAliasesMap[key] = Array.from(comboToAliases[key]);
-                }
-
-                // 第二階段：徹底拆分並歸類到正確的標準名字下
-                allCellStrings.forEach(str => {
-                    let parts = str.split(/[\s\n/、,+　]+/).map(p => p.trim());
-                    parts.forEach(name => {
-                        if (name.length >= 2 && !name.match(/^[0-9:.\-]+$/) && !name.match(/^S\d+$/i) && !ignoredKeywords.some(ig => name.includes(ig))) {
-                            
-                            if (aliasToCombo[name]) {
-                                finalStudentsSet.add(aliasToCombo[name]);
-                            } else {
-                                finalStudentsSet.add(name);
-                                if (!finalAliasesMap[name]) {
-                                    finalAliasesMap[name] = [name];
-                                }
-                            }
-                        }
-                    });
-                });
-
-                const allStudents = Array.from(finalStudentsSet).sort();
+                const allStudents = Array.from(sSet).sort();
                 setAvailableStudents(allStudents);
-                setStudentAliases(finalAliasesMap); // 儲存別名庫供排表時比對使用
 
                 if (teachers.includes(targetTeacherCol)) {
                     setSelectedTeacher(targetTeacherCol);
-                    // 改進預設勾選邏輯：只要標準名字或別名庫裡有命中預設7人，就自動勾選
-                    const preSelected = allStudents.filter(s => {
-                        return default7.some(d => s === d || s.includes(d) || (finalAliasesMap[s] && finalAliasesMap[s].includes(d)));
-                    });
+                    const preSelected = allStudents.filter(s => default7.includes(s));
                     setSelectedStudents(preSelected);
                 } else if (teachers.length > 0) {
                     setSelectedTeacher(teachers[0]);
@@ -267,9 +207,7 @@
                 setSelectedTeacher(newTeacher);
 
                 if (newTeacher === targetTeacherCol) {
-                    const preSelected = availableStudents.filter(s => {
-                        return default7.some(d => s === d || s.includes(d) || (studentAliases[s] && studentAliases[s].includes(d)));
-                    });
+                    const preSelected = availableStudents.filter(s => default7.includes(s));
                     setSelectedStudents(preSelected);
                 } else {
                     setSelectedStudents([]);
@@ -418,17 +356,9 @@
                         if (!cellValueClean) continue;
 
                         let matchedStudentsInCell = [];
-                        
-                        // 使用別名庫比對身份 (智能比對核心)
                         for (let student of selectedStudents) {
-                            let aliases = studentAliases[student] || [student];
-                            
-                            let isMatch = aliases.some(alias => {
-                                let cleanAlias = alias.replace(/\s+/g, '');
-                                return cleanAlias.length >= 2 && cellValueClean.includes(cleanAlias);
-                            });
-
-                            if (isMatch) {
+                            let cleanStudent = student.toUpperCase().replace(/\s+/g, '');
+                            if (cellValueClean.includes(cleanStudent)) {
                                 matchedStudentsInCell.push(student);
                             }
                         }
@@ -451,15 +381,7 @@
                             const isHighlight = cleanRawHeader === cleanSelectedTeacher;
 
                             for (let matchedStudent of matchedStudentsInCell) {
-                                const formatName = (name) => {
-                                    // 為了排版美觀，只顯示名字的前半部 (例如 林明 TAKLIM 只顯示 林明) 
-                                    // 或保留原名 (視乎長度)
-                                    let displayPart = name.split(' ')[0];
-                                    if(displayPart.length > 3 && displayPart.match(/^[A-Z]+$/)) {
-                                        return displayPart.charAt(0) + displayPart.slice(1).toLowerCase();
-                                    }
-                                    return displayPart;
-                                };
+                                const formatName = (name) => name.length > 3 && name.match(/^[A-Z]+$/) ? name.charAt(0) + name.slice(1).toLowerCase() : name;
                                 const displayName = formatName(matchedStudent);
                                 const finalName = hasMakeup ? `(補)${displayName}` : displayName;
 
@@ -484,6 +406,7 @@
                 let lastDowIdx = -1;
 
                 for (const day of daysList) {
+                    // 修改：只要這天有日期或星期，即使沒有課堂也保留它 (讓沒課的日子顯示出來)
                     if (day.events.length === 0 && !day.displayDate && day.dowIdx === -1) continue; 
                     if (day.dowIdx === 5 || day.dowIdx === 6) continue;
 
@@ -513,6 +436,7 @@
                     gridWeeks.push(currentGridWeek);
                 }
 
+                // 修改：整週即使沒課，只要有日子存在就列出
                 const finalWeeks = gridWeeks.filter(week => week.some(d => d !== null));
 
                 setScheduleData(finalWeeks);
@@ -522,15 +446,13 @@
 
             const formatParentName = (name) => {
                 let clean = name.replace(/[\(（\[【]?(補課|補)[\)）\]】]?/g, '').trim();
-                // 為了生成家長訊息，如果名字包含空格(林明 TAKLIM)，只提取中文或第一個字
-                let firstPart = clean.split(' ')[0];
-                if (/^[A-Za-z\s]+$/.test(firstPart)) {
-                    return firstPart.length > 3 ? firstPart.charAt(0).toUpperCase() + firstPart.slice(1).toLowerCase() : firstPart;
+                if (/^[A-Za-z\s]+$/.test(clean)) {
+                    return clean.length > 3 ? clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase() : clean;
                 }
-                if (firstPart.length === 3) {
-                    return firstPart.substring(1);
+                if (clean.length === 3) {
+                    return clean.substring(1);
                 }
-                return firstPart;
+                return clean;
             };
 
             const generateParentMessages = () => {
@@ -780,6 +702,7 @@
                                     <div id="visual-schedule" className="bg-white p-6 rounded-2xl border border-slate-200 overflow-x-auto relative">
                                         <div className="text-2xl font-bold text-center text-slate-800 mb-6 border-b-2 border-[#D4AF37] pb-4">{selectedMonth}月 {selectedTeacher} 訓練時間表</div>
                                         
+                                        {/* 新增：星期一至星期五的頂部表頭 */}
                                         <div className="w-full min-w-[800px] mb-3 grid grid-cols-5 gap-3">
                                             {['星期一', '星期二', '星期三', '星期四', '星期五'].map((dayName, idx) => (
                                                 <div key={idx} className={`font-bold text-center py-2.5 rounded-xl border ${dayBorderColors[idx]} ${dayColors[idx]} text-slate-700 shadow-sm`}>
