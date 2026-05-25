@@ -3,12 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SCCC 智能排表系統</title>
+    <title>YAN的文件助手</title>
     <!-- 引入 Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- 引入 React & ReactDOM -->
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script crossorigin="" src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin="" src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <!-- 引入 Babel -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <!-- 引入 SheetJS -->
@@ -45,6 +45,7 @@
     </style>
 </head>
 <body>
+
     <div id="root"></div>
 
     <script type="text/babel">
@@ -56,6 +57,8 @@
             
             const [availableTeachers, setAvailableTeachers] = useState([]);
             const [availableStudents, setAvailableStudents] = useState([]);
+            // 新增：用來記錄每個學生的多種寫法（別名庫）
+            const [studentAliases, setStudentAliases] = useState({});
             
             const [selectedTeacher, setSelectedTeacher] = useState('');
             const [selectedStudents, setSelectedStudents] = useState([]);
@@ -65,7 +68,6 @@
             const [error, setError] = useState('');
             const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
             const [isExporting, setIsExporting] = useState(false);
-            const [copySuccess, setCopySuccess] = useState(false);
 
             const [appMessage, setAppMessage] = useState('');
             const [showMsgModal, setShowMsgModal] = useState(false);
@@ -131,47 +133,124 @@
                 let teachers = headers.slice(2)
                                       .map(h => String(h).trim())
                                       .filter(h => {
-                                          const cleanH = h.toUpperCase().replace(/\s+/g, '');
-                                          return cleanH.includes('SCCW') && !cleanH.includes('SSCCW') && cleanH !== 'SCCW';
+                                          const cleanH = h.toUpperCase().replace(/[\s\n\r　]+/g, '');
+                                          if (!cleanH || ['日期','時間','星期','時間表'].includes(cleanH)) return false;
+                                          return (cleanH.includes('SCCW') || cleanH.includes('ST') || cleanH.includes('OT') || cleanH.includes('PT') || cleanH.includes('SW')) 
+                                                 && !cleanH.includes('SSCCW') 
+                                                 && !['SCCW','ST','OT','PT','SW'].includes(cleanH);
                                       });
                 
+                teachers = [...new Set(teachers)];
+
+                const getTeacherRank = (name) => {
+                    const clean = name.toUpperCase().replace(/[\s\n\r　]+/g, '');
+                    if (clean.includes('SCCW')) return 1;
+                    if (clean.includes('ST')) return 2;
+                    if (clean.includes('OT')) return 3;
+                    if (clean.includes('PT')) return 4;
+                    if (clean.includes('SW')) return 5;
+                    return 6;
+                };
+
                 teachers.sort((a, b) => {
                     if (a === targetTeacherCol) return -1;
                     if (b === targetTeacherCol) return 1;
-                    return 0;
+                    const rankA = getTeacherRank(a);
+                    const rankB = getTeacherRank(b);
+                    if (rankA !== rankB) return rankA - rankB;
+                    return a.localeCompare(b); 
                 });
-                
-                teachers = [...new Set(teachers)];
+
                 setAvailableTeachers(teachers);
 
-                let sSet = new Set();
                 const ignoredKeywords = ['ST','OT','PT','SCCW','SSCCW','SW','YAN','小組','家長','觀課','請假','ABS','(高)','(陳)','(李)','(敖)','(勞)','(魯)','(張)','(何)', '斑馬', '猴子', '青蛙', '海豚', '熊貓', '獅子', '企鵝', '大象', '長頸鹿', '白兔', '河馬', '松鼠', 'XXX', '小小運動會', '組'];
                 
+                // --- 智能合併引擎 (Rosetta Stone) 開始 ---
+                let allCellStrings = [];
                 for (let i = headerRowIndex + 1; i < data.length; i++) {
                     const row = data[i];
-                    if (!row || row.length === 0) continue;
+                    if (!row) continue;
                     for (let col = 2; col < headers.length; col++) {
-                        const cellValueRaw = row[col];
-                        if (!cellValueRaw) continue;
-                        
-                        let cleanStr = String(cellValueRaw).replace(/[\(（\[【]?(補課|補)[\)）\]】]?/g, '').replace(/\*/g, '').toUpperCase();
-                        let parts = cleanStr.split(/[\s\n/、,+　]+/);
-                        
-                        parts.forEach(p => {
-                            let name = p.trim();
-                            if (name.length >= 2 && !name.match(/^[0-9:.\-]+$/) && !name.match(/^S\d+$/i) && !ignoredKeywords.some(ig => name.includes(ig))) {
-                                sSet.add(name);
-                            }
-                        });
+                        if (row[col]) {
+                            let cleanStr = String(row[col]).replace(/[\(（\[【]?(補課|補)[\)）\]】]?/g, '').replace(/\*/g, '').toUpperCase();
+                            allCellStrings.push(cleanStr);
+                        }
                     }
                 }
+
+                let aliasToCombo = {}; 
+                let comboToAliases = {};
+
+                // 第一階段：尋找中英混合的名字並建立關聯庫
+                allCellStrings.forEach(str => {
+                    // 只用換行、逗號來分割（保留空格和斜線以偵測中英組合）
+                    let chunks = str.split(/[\n、,+　]+/).map(c => c.trim()).filter(c => c);
+                    
+                    chunks.forEach(chunk => {
+                        let cleanChunk = chunk;
+                        ignoredKeywords.forEach(ig => { cleanChunk = cleanChunk.replace(new RegExp(ig, 'g'), ''); });
+                        
+                        let zhMatch = cleanChunk.match(/[\u4e00-\u9fa5]{2,}/); // 至少兩位中文
+                        let enMatches = cleanChunk.match(/[A-Z]{2,}/g); // 至少兩位英文
+                        let validEn = null;
+                        
+                        if (enMatches) {
+                            // 確保配對到的英文不是治療師簡稱
+                            validEn = enMatches.find(e => !['OT','ST','PT','SW','ABS'].includes(e));
+                        }
+                        
+                        if (zhMatch && validEn) {
+                            let zh = zhMatch[0];
+                            let en = validEn;
+                            let displayName = `${zh} ${en}`; // 建立標準名字: 例如 "林明 TAKLIM"
+                            
+                            aliasToCombo[zh] = displayName;
+                            aliasToCombo[en] = displayName;
+                            
+                            if (!comboToAliases[displayName]) {
+                                comboToAliases[displayName] = new Set([zh, en, displayName, displayName.replace(' ', '')]);
+                            }
+                            // 把原本的字串去空白後也加入別名庫 (涵蓋 林明TAKLIM 這種無空白寫法)
+                            comboToAliases[displayName].add(cleanChunk.replace(/\s+|\//g, ''));
+                        }
+                    });
+                });
+
+                let finalStudentsSet = new Set();
+                let finalAliasesMap = {};
                 
-                const allStudents = Array.from(sSet).sort();
+                for(let key in comboToAliases) {
+                    finalAliasesMap[key] = Array.from(comboToAliases[key]);
+                }
+
+                // 第二階段：徹底拆分並歸類到正確的標準名字下
+                allCellStrings.forEach(str => {
+                    let parts = str.split(/[\s\n/、,+　]+/).map(p => p.trim());
+                    parts.forEach(name => {
+                        if (name.length >= 2 && !name.match(/^[0-9:.\-]+$/) && !name.match(/^S\d+$/i) && !ignoredKeywords.some(ig => name.includes(ig))) {
+                            
+                            if (aliasToCombo[name]) {
+                                finalStudentsSet.add(aliasToCombo[name]);
+                            } else {
+                                finalStudentsSet.add(name);
+                                if (!finalAliasesMap[name]) {
+                                    finalAliasesMap[name] = [name];
+                                }
+                            }
+                        }
+                    });
+                });
+
+                const allStudents = Array.from(finalStudentsSet).sort();
                 setAvailableStudents(allStudents);
+                setStudentAliases(finalAliasesMap); // 儲存別名庫供排表時比對使用
 
                 if (teachers.includes(targetTeacherCol)) {
                     setSelectedTeacher(targetTeacherCol);
-                    const preSelected = allStudents.filter(s => default7.includes(s));
+                    // 改進預設勾選邏輯：只要標準名字或別名庫裡有命中預設7人，就自動勾選
+                    const preSelected = allStudents.filter(s => {
+                        return default7.some(d => s === d || s.includes(d) || (finalAliasesMap[s] && finalAliasesMap[s].includes(d)));
+                    });
                     setSelectedStudents(preSelected);
                 } else if (teachers.length > 0) {
                     setSelectedTeacher(teachers[0]);
@@ -188,7 +267,9 @@
                 setSelectedTeacher(newTeacher);
 
                 if (newTeacher === targetTeacherCol) {
-                    const preSelected = availableStudents.filter(s => default7.includes(s));
+                    const preSelected = availableStudents.filter(s => {
+                        return default7.some(d => s === d || s.includes(d) || (studentAliases[s] && studentAliases[s].includes(d)));
+                    });
                     setSelectedStudents(preSelected);
                 } else {
                     setSelectedStudents([]);
@@ -337,9 +418,17 @@
                         if (!cellValueClean) continue;
 
                         let matchedStudentsInCell = [];
+                        
+                        // 使用別名庫比對身份 (智能比對核心)
                         for (let student of selectedStudents) {
-                            let cleanStudent = student.toUpperCase().replace(/\s+/g, '');
-                            if (cellValueClean.includes(cleanStudent)) {
+                            let aliases = studentAliases[student] || [student];
+                            
+                            let isMatch = aliases.some(alias => {
+                                let cleanAlias = alias.replace(/\s+/g, '');
+                                return cleanAlias.length >= 2 && cellValueClean.includes(cleanAlias);
+                            });
+
+                            if (isMatch) {
                                 matchedStudentsInCell.push(student);
                             }
                         }
@@ -350,16 +439,27 @@
                             const rawHeader = String(headers[col] || "").trim();
                             
                             let therapyType = rawHeader;
-                            if (rawHeader.includes('SCCW')) therapyType = 'SCCW';
-                            else if (rawHeader.includes('ST')) therapyType = 'ST';
-                            else if (rawHeader.includes('OT')) therapyType = 'OT';
-                            else if (rawHeader.includes('PT')) therapyType = 'PT';
-                            else if (rawHeader.includes('SW')) therapyType = 'SW';
+                            const upperRawHeader = rawHeader.toUpperCase();
+                            if (upperRawHeader.includes('SCCW')) therapyType = 'SCCW';
+                            else if (upperRawHeader.includes('ST')) therapyType = 'ST';
+                            else if (upperRawHeader.includes('OT')) therapyType = 'OT';
+                            else if (upperRawHeader.includes('PT')) therapyType = 'PT';
+                            else if (upperRawHeader.includes('SW')) therapyType = 'SW';
 
-                            const isHighlight = rawHeader === selectedTeacher;
+                            const cleanRawHeader = String(rawHeader).toUpperCase().replace(/[\s\n\r　]+/g, '');
+                            const cleanSelectedTeacher = String(selectedTeacher).toUpperCase().replace(/[\s\n\r　]+/g, '');
+                            const isHighlight = cleanRawHeader === cleanSelectedTeacher;
 
                             for (let matchedStudent of matchedStudentsInCell) {
-                                const formatName = (name) => name.length > 3 && name.match(/^[A-Z]+$/) ? name.charAt(0) + name.slice(1).toLowerCase() : name;
+                                const formatName = (name) => {
+                                    // 為了排版美觀，只顯示名字的前半部 (例如 林明 TAKLIM 只顯示 林明) 
+                                    // 或保留原名 (視乎長度)
+                                    let displayPart = name.split(' ')[0];
+                                    if(displayPart.length > 3 && displayPart.match(/^[A-Z]+$/)) {
+                                        return displayPart.charAt(0) + displayPart.slice(1).toLowerCase();
+                                    }
+                                    return displayPart;
+                                };
                                 const displayName = formatName(matchedStudent);
                                 const finalName = hasMakeup ? `(補)${displayName}` : displayName;
 
@@ -384,7 +484,7 @@
                 let lastDowIdx = -1;
 
                 for (const day of daysList) {
-                    if (day.events.length === 0) continue; 
+                    if (day.events.length === 0 && !day.displayDate && day.dowIdx === -1) continue; 
                     if (day.dowIdx === 5 || day.dowIdx === 6) continue;
 
                     let targetDow = day.dowIdx;
@@ -413,7 +513,7 @@
                     gridWeeks.push(currentGridWeek);
                 }
 
-                const finalWeeks = gridWeeks.filter(week => week.some(d => d && d.events.length > 0));
+                const finalWeeks = gridWeeks.filter(week => week.some(d => d !== null));
 
                 setScheduleData(finalWeeks);
                 setLoading(false);
@@ -422,13 +522,15 @@
 
             const formatParentName = (name) => {
                 let clean = name.replace(/[\(（\[【]?(補課|補)[\)）\]】]?/g, '').trim();
-                if (/^[A-Za-z\s]+$/.test(clean)) {
-                    return clean.length > 3 ? clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase() : clean;
+                // 為了生成家長訊息，如果名字包含空格(林明 TAKLIM)，只提取中文或第一個字
+                let firstPart = clean.split(' ')[0];
+                if (/^[A-Za-z\s]+$/.test(firstPart)) {
+                    return firstPart.length > 3 ? firstPart.charAt(0).toUpperCase() + firstPart.slice(1).toLowerCase() : firstPart;
                 }
-                if (clean.length === 3) {
-                    return clean.substring(1);
+                if (firstPart.length === 3) {
+                    return firstPart.substring(1);
                 }
-                return clean;
+                return firstPart;
             };
 
             const generateParentMessages = () => {
@@ -524,7 +626,8 @@
             };
 
             const handleExport = async (type) => {
-                const fileName = `SCCC_${selectedTeacher}的時間表_${selectedMonth}月`;
+                const cleanTeacherName = selectedTeacher.replace(/[\s\n\r　]+/g, '_');
+                const fileName = `SCCC_${cleanTeacherName}的時間表_${selectedMonth}月`;
 
                 if (type === 'word') {
                     const tableHtml = document.getElementById('export-table').outerHTML;
@@ -583,9 +686,9 @@
                     <div className="w-full max-w-6xl bg-white rounded-3xl shadow-lg overflow-hidden border border-slate-100 relative">
                         <div className="bg-[#2C3E50] p-8 text-white text-center relative z-10 border-b-4 border-[#D4AF37]">
                             <h1 className="text-3xl font-bold mb-2 tracking-wide flex items-center justify-center">
-                                SCCC 智能排表系統
+                                Yan的文件小助手
                             </h1>
-                            <p className="text-sm font-medium text-slate-300">專業、精準、化繁為簡的教師專屬工具</p>
+                            <p className="text-sm font-medium text-slate-300">Only for Yan & her friends</p>
                         </div>
 
                         {appMessage && (
@@ -618,7 +721,7 @@
                                     <h2 className="text-2xl font-bold text-slate-800 text-center mb-8">2. 選擇負責導師與學生</h2>
                                     <div className="grid md:grid-cols-2 gap-6 max-w-4xl mx-auto">
                                         <div className="bg-[#F8FAFC] border border-slate-200 rounded-2xl p-6">
-                                            <h3 className="text-lg font-bold text-slate-700 mb-4">導師身份 (SCCW)</h3>
+                                            <h3 className="text-lg font-bold text-slate-700 mb-4">負責導師/治療師</h3>
                                             <select value={selectedTeacher} onChange={handleTeacherChange} className="w-full p-3 border border-slate-300 rounded-xl font-semibold text-slate-700 bg-white cursor-pointer">
                                                 {availableTeachers.map((t, idx) => <option key={idx} value={t}>{t}</option>)}
                                             </select>
@@ -675,9 +778,18 @@
                                     </div>
                                     
                                     <div id="visual-schedule" className="bg-white p-6 rounded-2xl border border-slate-200 overflow-x-auto relative">
-                                        <div className="text-2xl font-bold text-center text-slate-800 mb-8 border-b-2 border-[#D4AF37] pb-4">{selectedMonth}月 {selectedTeacher} 訓練時間表</div>
+                                        <div className="text-2xl font-bold text-center text-slate-800 mb-6 border-b-2 border-[#D4AF37] pb-4">{selectedMonth}月 {selectedTeacher} 訓練時間表</div>
+                                        
+                                        <div className="w-full min-w-[800px] mb-3 grid grid-cols-5 gap-3">
+                                            {['星期一', '星期二', '星期三', '星期四', '星期五'].map((dayName, idx) => (
+                                                <div key={idx} className={`font-bold text-center py-2.5 rounded-xl border ${dayBorderColors[idx]} ${dayColors[idx]} text-slate-700 shadow-sm`}>
+                                                    {dayName}
+                                                </div>
+                                            ))}
+                                        </div>
+
                                         {scheduleData.map((week, weekIdx) => (
-                                            <div key={weekIdx} className="w-full min-w-[800px] mb-8 grid grid-cols-5 gap-3">
+                                            <div key={weekIdx} className="w-full min-w-[800px] mb-6 grid grid-cols-5 gap-3">
                                                 {week.map((dayObj, dayIdx) => (
                                                     <div key={dayIdx} className={`bg-white border rounded-xl p-3 min-h-[140px] ${dayObj ? dayBorderColors[dayIdx] : 'border-slate-100'}`}>
                                                         <div className="font-bold text-sm text-slate-600 border-b border-dashed border-slate-200 pb-2 mb-2 text-center">{dayObj ? dayObj.displayDate : ''}</div>
