@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SCCC 智能排表系統</title>
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- 引入 Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- 引入 SheetJS -->
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
+    <!-- 引入 html2canvas & html2pdf -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap');
+        body { 
+            font-family: 'Nunito', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background-color: #F8F9FA; 
+            color: #334155;
+        }
+        #clipboard-area { position: absolute; left: -9999px; top: -9999px; }
+        
+        .dropdown-content { display: none; }
+        .dropdown:hover .dropdown-content { display: block; }
+        
+        .btn-hover { transition: all 0.2s ease-in-out; }
+        .btn-hover:hover { transform: translateY(-2px); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); }
+        .btn-hover:active { transform: translateY(1px); }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        
+        @keyframes fadeInScale {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        .animate-modal { animation: fadeInScale 0.2s ease-out forwards; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState } = React;
+
+        const App = () => {
+            const [step, setStep] = useState(1); 
+            const [rawExcelData, setRawExcelData] = useState({ data: null, headers: null, headerRowIndex: -1 });
+            
+            const [availableTeachers, setAvailableTeachers] = useState([]);
+            const [availableStudents, setAvailableStudents] = useState([]);
+            
+            const [selectedTeacher, setSelectedTeacher] = useState('');
+            const [selectedStudents, setSelectedStudents] = useState([]);
+            
+            const [scheduleData, setScheduleData] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState('');
+            const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
+            const [isExporting, setIsExporting] = useState(false);
+            const [copySuccess, setCopySuccess] = useState(false);
+
+            const [appMessage, setAppMessage] = useState('');
+            const [showMsgModal, setShowMsgModal] = useState(false);
+            const [parentMessages, setParentMessages] = useState({});
+            const [activeMsgTab, setActiveMsgTab] = useState('');
+
+            const default7 = ['鄧芷妤', '溫晟希', '李彥樂', 'ETHAN', '蔡曉曈', 'FELICIA', 'NAGATA'].map(s => s.toUpperCase());
+            const targetTeacherCol = 'SCCW(陳) YAN';
+
+            const handleFileUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                setLoading(true);
+                setError('');
+
+                const reader = new FileReader();
+                reader.onload = (evt) => {
+                    try {
+                        const bstr = evt.target.result;
+                        const wb = XLSX.read(bstr, { type: 'binary' });
+                        
+                        let targetSheetName = wb.SheetNames[0];
+                        for (let name of wb.SheetNames) {
+                            let lowerName = name.toLowerCase();
+                            if (/\d/.test(name) && !lowerName.includes('freq') && !lowerName.includes('record') && !lowerName.includes('gp') && !lowerName.includes('blank')) {
+                                targetSheetName = name;
+                                break;
+                            }
+                        }
+                        
+                        const sheet = wb.Sheets[targetSheetName];
+                        const jsonData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: true });
+                        extractOptions(jsonData);
+                    } catch (err) {
+                        console.error(err);
+                        setError('讀取檔案失敗，請確保上傳的是正確的 Excel 檔案 (.xlsx)。');
+                        setLoading(false);
+                    }
+                };
+                reader.readAsBinaryString(file);
+            };
+
+            const extractOptions = (data) => {
+                let headers = [];
+                let headerRowIndex = -1;
+
+                for (let i = 0; i < data.length; i++) {
+                    const rowStr = data[i].join('');
+                    if (rowStr.includes('日期') && rowStr.includes('時間')) {
+                        headers = data[i];
+                        headerRowIndex = i;
+                        break;
+                    }
+                }
+
+                if (headerRowIndex === -1) {
+                    setError('找不到標準的表格格式（請確保 Excel 左邊有「日期」和「時間」欄位）');
+                    setLoading(false);
+                    return;
+                }
+
+                let teachers = headers.slice(2)
+                                      .map(h => String(h).trim())
+                                      .filter(h => {
+                                          const cleanH = h.toUpperCase().replace(/\s+/g, '');
+                                          return cleanH.includes('SCCW') && !cleanH.includes('SSCCW') && cleanH !== 'SCCW';
+                                      });
+                
+                teachers.sort((a, b) => {
+                    if (a === targetTeacherCol) return -1;
+                    if (b === targetTeacherCol) return 1;
+                    return 0;
+                });
+                
+                teachers = [...new Set(teachers)];
+                setAvailableTeachers(teachers);
+
+                let sSet = new Set();
+                const ignoredKeywords = ['ST','OT','PT','SCCW','SSCCW','SW','YAN','小組','家長','觀課','請假','ABS','(高)','(陳)','(李)','(敖)','(勞)','(魯)','(張)','(何)', '斑馬', '猴子', '青蛙', '海豚', '熊貓', '獅子', '企鵝', '大象', '長頸鹿', '白兔', '河馬', '松鼠', 'XXX', '小小運動會', '組'];
+                
+                for (let i = headerRowIndex + 1; i < data.length; i++) {
+                    const row = data[i];
+                    if (!row || row.length === 0) continue;
+                    for (let col = 2; col < headers.length; col++) {
+                        const cellValueRaw = row[col];
+                        if (!cellValueRaw) continue;
+                        
+                        let cleanStr = String(cellValueRaw).replace(/[\(（\[【]?(補課|補)[\)）\]】]?/g, '').replace(/\*/g, '').toUpperCase();
+                        let parts = cleanStr.split(/[\s\n/、,+　]+/);
+                        
+                        parts.forEach(p => {
+                            let name = p.trim();
+                            if (name.length >= 2 && !name.match(/^[0-9:.\-]+$/) && !name.match(/^S\d+$/i) && !ignoredKeywords.some(ig => name.includes(ig))) {
+                                sSet.add(name);
+                            }
+                        });
+                    }
+                }
+                
+                const allStudents = Array.from(sSet).sort();
+                setAvailableStudents(allStudents);
+
+                if (teachers.includes(targetTeacherCol)) {
+                    setSelectedTeacher(targetTeacherCol);
+                    const preSelected = allStudents.filter(s => default7.includes(s));
+                    setSelectedStudents(preSelected);
+                } else if (teachers.length > 0) {
+                    setSelectedTeacher(teachers[0]);
+                    setSelectedStudents([]); 
+                }
+
+                setRawExcelData({ data, headers, headerRowIndex });
+                setLoading(false);
+                setStep(2); 
+            };
+
+            const handleTeacherChange = (e) => {
+                const newTeacher = e.target.value;
+                setSelectedTeacher(newTeacher);
+
+                if (newTeacher === targetTeacherCol) {
+                    const preSelected = availableStudents.filter(s => default7.includes(s));
+                    setSelectedStudents(preSelected);
+                } else {
+                    setSelectedStudents([]);
+                }
+            };
+
+            const toggleStudent = (studentName) => {
+                if (selectedStudents.includes(studentName)) {
+                    setSelectedStudents(selectedStudents.filter(s => s !== studentName));
+                } else {
+                    if (selectedStudents.length >= 7) {
+                        setAppMessage('為確保排版清晰，每份時間表最多支援選擇 7 位學生。');
+                        return;
+                    }
+                    setSelectedStudents([...selectedStudents, studentName]);
+                }
+            };
+
+            const formatTime = (h, m) => {
+                if (h >= 18) h -= 12; 
+                if (h >= 1 && h <= 7) h += 12; 
+                let mins = h * 60 + m;
+                let h12 = h > 12 ? h - 12 : (h === 0 ? 12 : h);
+                return { mins, label: `${h12}:${m.toString().padStart(2, '0')}` };
+            };
+
+            const parseTime = (rawTime) => {
+                if (!rawTime) return null;
+                if (typeof rawTime === 'number') {
+                    let totalMins = Math.round(rawTime * 24 * 60);
+                    let h = Math.floor(totalMins / 60);
+                    let m = totalMins % 60;
+                    return formatTime(h, m);
+                }
+                let str = String(rawTime).split('-')[0].replace(/[^0-9:.]/g, '');
+                if (!str) return null;
+                let match = str.match(/(\d{1,2})[:.](\d{2})/);
+                if (match) return formatTime(parseInt(match[1], 10), parseInt(match[2], 10));
+                let numMatch = str.match(/^(\d{3,4})$/);
+                if (numMatch) {
+                    let h = parseInt(numMatch[1].length === 3 ? numMatch[1].slice(0, 1) : numMatch[1].slice(0, 2), 10);
+                    let m = parseInt(numMatch[1].slice(-2), 10);
+                    return formatTime(h, m);
+                }
+                return null;
+            };
+
+            const generateSchedule = () => {
+                if (selectedStudents.length === 0) {
+                    setAppMessage('請至少選擇 1 位學生以生成時間表。');
+                    return;
+                }
+                setLoading(true);
+
+                const { data, headers, headerRowIndex } = rawExcelData;
+                const daysList = [];
+                let currentDayObj = null;
+                let lastTimeLabel = "";
+                let lastTimeMins = -1;
+
+                for (let i = headerRowIndex + 1; i < data.length; i++) {
+                    const row = data[i];
+                    if (!row || row.length === 0) continue;
+
+                    let col0Raw = row[0];
+                    let parsedDate = null;
+                    let parsedDow = -1;
+                    let parsedYear = new Date().getFullYear();
+
+                    if (typeof col0Raw === 'number' && col0Raw > 30000) {
+                        const d = XLSX.SSF.parse_date_code(col0Raw);
+                        parsedDate = `${d.d}/${d.m}`;
+                        parsedYear = d.y;
+                        let dow = new Date(d.y, d.m - 1, d.d).getDay();
+                        parsedDow = dow === 0 ? 6 : dow - 1; 
+                    } else if (typeof col0Raw === 'string') {
+                        let str = col0Raw.replace(/　/g, '').trim();
+                        if (str && !["日期", "時間", "星期", "時間表"].includes(str)) {
+                            let dateMatch = str.match(/(\d{1,2})\s*[\/\-]\s*(\d{1,2})/);
+                            if (dateMatch) {
+                                parsedDate = `${parseInt(dateMatch[1], 10)}/${parseInt(dateMatch[2], 10)}`;
+                            } else {
+                                let mMatch = str.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+                                if (mMatch) parsedDate = `${parseInt(mMatch[2], 10)}/${parseInt(mMatch[1], 10)}`;
+                            }
+                            if (str.includes('一')) parsedDow = 0;
+                            else if (str.includes('二')) parsedDow = 1;
+                            else if (str.includes('三')) parsedDow = 2;
+                            else if (str.includes('四')) parsedDow = 3;
+                            else if (str.includes('五')) parsedDow = 4;
+                            else if (str.includes('六')) parsedDow = 5;
+                            else if (str.includes('日')) parsedDow = 6;
+                        }
+                    }
+
+                    let hasDateOrDow = (parsedDate !== null || parsedDow !== -1);
+                    let isNewDay = false;
+                    
+                    if (hasDateOrDow) {
+                        if (!currentDayObj) isNewDay = true;
+                        else {
+                            if (parsedDate !== null && currentDayObj.displayDate !== "" && parsedDate !== currentDayObj.displayDate) isNewDay = true;
+                            else if (parsedDow !== -1 && currentDayObj.dowIdx !== -1 && parsedDow !== currentDayObj.dowIdx) isNewDay = true;
+                        }
+                    }
+
+                    let timeData = parseTime(row[1]);
+                    let timeMins = timeData ? timeData.mins : -1;
+                    
+                    if (currentDayObj && timeMins !== -1 && lastTimeMins !== -1) {
+                        if (timeMins < lastTimeMins - 60 && timeMins < 720) isNewDay = true;
+                    }
+
+                    if (isNewDay) {
+                        currentDayObj = { displayDate: parsedDate || "", dowIdx: parsedDow, year: parsedYear, events: [] };
+                        daysList.push(currentDayObj);
+                        lastTimeLabel = "";
+                        lastTimeMins = -1; 
+                    } else if (currentDayObj) {
+                        if (parsedDate && !currentDayObj.displayDate) currentDayObj.displayDate = parsedDate;
+                        if (parsedDow !== -1 && currentDayObj.dowIdx === -1) currentDayObj.dowIdx = parsedDow;
+                        if (parsedYear && !currentDayObj.year) currentDayObj.year = parsedYear;
+                    } 
+
+                    let timeLabel = timeData ? timeData.label : lastTimeLabel;
+
+                    if (timeData) {
+                        lastTimeLabel = timeData.label;
+                        lastTimeMins = timeMins;
+                    }
+
+                    if (timeLabel && !currentDayObj) {
+                        currentDayObj = { displayDate: "", dowIdx: -1, year: parsedYear, events: [] };
+                        daysList.push(currentDayObj);
+                    }
+
+                    if (!currentDayObj || !timeLabel) continue;
+
+                    const maxCols = Math.max(headers.length, row.length);
+                    for (let col = 2; col < maxCols; col++) {
+                        const cellValueRaw = row[col];
+                        if (!cellValueRaw) continue;
+
+                        const cellValueOriginal = String(cellValueRaw).toUpperCase();
+                        const cellValueClean = cellValueOriginal.replace(/\s+/g, '');
+                        if (!cellValueClean) continue;
+
+                        let matchedStudentsInCell = [];
+                        for (let student of selectedStudents) {
+                            let cleanStudent = student.toUpperCase().replace(/\s+/g, '');
+                            if (cellValueClean.includes(cleanStudent)) {
+                                matchedStudentsInCell.push(student);
+                            }
+                        }
+
+                        if (matchedStudentsInCell.length > 0) {
+                            const isParentAttending = cellValueOriginal.includes('*');
+                            const hasMakeup = cellValueOriginal.includes('補'); 
+                            const rawHeader = String(headers[col] || "").trim();
+                            
+                            let therapyType = rawHeader;
+                            if (rawHeader.includes('SCCW')) therapyType = 'SCCW';
+                            else if (rawHeader.includes('ST')) therapyType = 'ST';
+                            else if (rawHeader.includes('OT')) therapyType = 'OT';
+                            else if (rawHeader.includes('PT')) therapyType = 'PT';
+                            else if (rawHeader.includes('SW')) therapyType = 'SW';
+
+                            const isHighlight = rawHeader === selectedTeacher;
+
+                            for (let matchedStudent of matchedStudentsInCell) {
+                                const formatName = (name) => name.length > 3 && name.match(/^[A-Z]+$/) ? name.charAt(0) + name.slice(1).toLowerCase() : name;
+                                const displayName = formatName(matchedStudent);
+                                const finalName = hasMakeup ? `(補)${displayName}` : displayName;
+
+                                const eventStr = `${finalName} ${therapyType} ${timeLabel}${isParentAttending ? '*' : ''}`;
+                                
+                                currentDayObj.events.push({
+                                    rawName: matchedStudent,
+                                    timeLabel: timeLabel,
+                                    therapyType: therapyType,
+                                    isParentAttending: isParentAttending,
+                                    text: eventStr,
+                                    isHighlight: isHighlight,
+                                    isMakeup: hasMakeup 
+                                });
+                            }
+                        }
+                    }
+                }
+
+                const gridWeeks = [];
+                let currentGridWeek = [null, null, null, null, null];
+                let lastDowIdx = -1;
+
+                for (const day of daysList) {
+                    if (day.events.length === 0) continue; 
+                    if (day.dowIdx === 5 || day.dowIdx === 6) continue;
+
+                    let targetDow = day.dowIdx;
+
+                    if (targetDow === -1) {
+                        targetDow = lastDowIdx + 1;
+                        if (targetDow > 4) targetDow = 0; 
+                    }
+
+                    if (currentGridWeek[targetDow] !== null || (lastDowIdx !== -1 && targetDow <= lastDowIdx)) {
+                        gridWeeks.push(currentGridWeek);
+                        currentGridWeek = [null, null, null, null, null];
+                    }
+                    
+                    if (!day.displayDate && day.dowIdx === -1) {
+                        day.displayDate = ['星期一', '星期二', '星期三', '星期四', '星期五'][targetDow];
+                    } else if (!day.displayDate && day.dowIdx !== -1) {
+                        day.displayDate = ['星期一', '星期二', '星期三', '星期四', '星期五'][day.dowIdx];
+                    }
+
+                    currentGridWeek[targetDow] = day;
+                    lastDowIdx = targetDow;
+                }
+                
+                if (currentGridWeek.some(day => day !== null)) {
+                    gridWeeks.push(currentGridWeek);
+                }
+
+                const finalWeeks = gridWeeks.filter(week => week.some(d => d && d.events.length > 0));
+
+                setScheduleData(finalWeeks);
+                setLoading(false);
+                setStep(3); 
+            };
+
+            const formatParentName = (name) => {
+                let clean = name.replace(/[\(（\[【]?(補課|補)[\)）\]】]?/g, '').trim();
+                if (/^[A-Za-z\s]+$/.test(clean)) {
+                    return clean.length > 3 ? clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase() : clean;
+                }
+                if (clean.length === 3) {
+                    return clean.substring(1);
+                }
+                return clean;
+            };
+
+            const generateParentMessages = () => {
+                let msgs = {};
+                
+                selectedStudents.forEach(student => {
+                    let studentEvents = [];
+                    let hasStarInMonth = false;
+
+                    if (scheduleData) {
+                        scheduleData.forEach(week => {
+                            week.forEach(day => {
+                                if (day && day.events) {
+                                    day.events.forEach(ev => {
+                                        if (ev.rawName === student) {
+                                            studentEvents.push({
+                                                date: day.displayDate,
+                                                year: day.year || new Date().getFullYear(),
+                                                time: ev.timeLabel,
+                                                type: ev.therapyType,
+                                                isStar: ev.isParentAttending
+                                            });
+                                            if (ev.isParentAttending) hasStarInMonth = true;
+                                        }
+                                    });
+                                }
+                            });
+                        });
+                    }
+
+                    if (studentEvents.length === 0) {
+                        msgs[student] = "此學生本月暫無被安排的訓練課堂。";
+                        return;
+                    }
+
+                    let msgText = `親愛的${formatParentName(student)}家長，\n你好😊以下是${selectedMonth}月份的學童訓練時間:\n\n`;
+
+                    studentEvents.forEach(ev => {
+                        let dateParts = ev.date.split('/');
+                        let formattedDate = dateParts.length === 2 ? `${dateParts[0]}/${dateParts[1]}/${ev.year}` : ev.date;
+                        
+                        let therapyName = '';
+                        if (ev.type === 'OT') therapyName = '職業治療師訓練';
+                        else if (ev.type === 'PT') therapyName = '物理治療師訓練';
+                        else if (ev.type === 'ST') therapyName = '言語治療師訓練';
+                        else if (ev.type === 'SCCW') therapyName = '老師訓練';
+                        else if (ev.type === 'SW') therapyName = '社工訓練';
+                        else therapyName = ev.type + '訓練';
+
+                        msgText += `${formattedDate}\n${ev.time}${therapyName}${ev.isStar ? '*' : ''}\n\n`;
+                    });
+
+                    if (hasStarInMonth) {
+                        msgText += `標註了 “*” 的日子，家長可陪同學童一起出席訓練😊\n學童需按時出席已安排日子的訓練😊\n\n`;
+                    }
+
+                    msgText += `❓如家長對以上內容有任何查詢，請致電2126 7600與班主任聯絡，謝謝🙏🏻`;
+                    msgs[student] = msgText;
+                });
+
+                setParentMessages(msgs);
+                setActiveMsgTab(selectedStudents[0]);
+                setShowMsgModal(true);
+            };
+
+            const copyToClipboard = () => {
+                const textToCopy = parentMessages[activeMsgTab] || '';
+                const textArea = document.createElement("textarea");
+                textArea.value = textToCopy;
+                textArea.style.position = "fixed";
+                textArea.style.left = "-999999px";
+                textArea.style.top = "-999999px";
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+                try {
+                    document.execCommand('copy');
+                } catch (err) {
+                    console.error('Copy to clipboard failed:', err);
+                }
+                textArea.remove();
+
+                const btn = document.getElementById('copyBtn');
+                if (btn) {
+                    const originalText = btn.innerHTML;
+                    btn.innerHTML = '✅ 已成功複製！';
+                    btn.classList.add('bg-emerald-600');
+                    setTimeout(() => {
+                        btn.innerHTML = originalText;
+                        btn.classList.remove('bg-emerald-600');
+                    }, 2000);
+                }
+            };
+
+            const handleExport = async (type) => {
+                const fileName = `SCCC_${selectedTeacher}的時間表_${selectedMonth}月`;
+
+                if (type === 'word') {
+                    const tableHtml = document.getElementById('export-table').outerHTML;
+                    const html = `
+                        <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+                        <head><meta charset="utf-8"><title>Export</title></head>
+                        <body>${tableHtml}</body>
+                        </html>
+                    `;
+                    const blob = new Blob(['\ufeff', html], { type: 'application/msword' });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = `${fileName}.doc`;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                } else if (type === 'excel') {
+                    const table = document.getElementById('export-table');
+                    const wb = XLSX.utils.table_to_book(table, { sheet: "時間表", raw: true });
+                    XLSX.writeFile(wb, `${fileName}.xlsx`);
+                } else if (type === 'pdf') {
+                    setIsExporting(true);
+                    const element = document.getElementById('visual-schedule');
+                    if (element) {
+                        const opt = {
+                            margin:       10,
+                            filename:     `${fileName}.pdf`,
+                            image:        { type: 'jpeg', quality: 0.98 },
+                            html2canvas:  { scale: 2, useCORS: true, backgroundColor: "#FFFFFF" },
+                            jsPDF:        { unit: 'mm', format: 'a4', orientation: 'landscape' }
+                        };
+                        await html2pdf().set(opt).from(element).save();
+                    }
+                    setIsExporting(false);
+                } else if (type === 'jpg') {
+                    setIsExporting(true);
+                    const element = document.getElementById('visual-schedule');
+                    if (element) {
+                        html2canvas(element, { scale: 2, backgroundColor: "#FFFFFF" }).then(canvas => {
+                            const link = document.createElement('a');
+                            link.download = `${fileName}.jpg`;
+                            link.href = canvas.toDataURL('image/jpeg', 0.9);
+                            link.click();
+                            setIsExporting(false);
+                        });
+                    }
+                }
+            };
+
+            const dayColors = ['bg-[#F1F5F9]', 'bg-[#FFFBEB]', 'bg-[#ECFDF5]', 'bg-[#FFF1F2]', 'bg-[#EEF2FF]'];
+            const dayBorderColors = ['border-slate-200', 'border-amber-200', 'border-emerald-200', 'border-rose-200', 'border-indigo-200'];
+
+            return (
+                <div className="min-h-screen p-4 md:p-8 flex flex-col items-center">
+                    <div className="w-full max-w-6xl bg-white rounded-3xl shadow-lg overflow-hidden border border-slate-100 relative">
+                        <div className="bg-[#2C3E50] p-8 text-white text-center relative z-10 border-b-4 border-[#D4AF37]">
+                            <h1 className="text-3xl font-bold mb-2 tracking-wide flex items-center justify-center">
+                                SCCC 智能排表系統
+                            </h1>
+                            <p className="text-sm font-medium text-slate-300">專業、精準、化繁為簡的教師專屬工具</p>
+                        </div>
+
+                        {appMessage && (
+                            <div className="bg-amber-100 border-l-4 border-amber-500 text-amber-900 p-4 mx-8 mt-4 rounded shadow-sm">
+                                <p>{appMessage}</p>
+                                <button className="text-sm underline mt-2" onClick={() => setAppMessage('')}>關閉</button>
+                            </div>
+                        )}
+
+                        <div className="p-8 relative z-10">
+                            {step === 1 && (
+                                <div className="flex flex-col items-center animate-modal">
+                                    <div className="text-center mb-8">
+                                        <h2 className="text-xl font-bold text-slate-700 mb-3">1. 設定排表月份</h2>
+                                        <select value={selectedMonth} onChange={(e) => setSelectedMonth(Number(e.target.value))} className="w-48 p-3 border-2 border-slate-200 rounded-xl focus:outline-none focus:border-[#4A90E2] text-center font-bold text-lg text-slate-700 bg-white cursor-pointer shadow-sm btn-hover">
+                                            {[...Array(12)].map((_, i) => <option key={i + 1} value={i + 1}>{i + 1} 月</option>)}
+                                        </select>
+                                    </div>
+                                    <label className="cursor-pointer bg-[#F8FAFC] border-2 border-dashed border-slate-300 hover:border-[#4A90E2] rounded-2xl px-10 py-16 w-full max-w-lg text-center transition-all hover:bg-slate-50 btn-hover group">
+                                        <span className="block text-xl font-bold text-slate-700 mb-2">上傳排表數據 (Excel)</span>
+                                        <input type="file" className="hidden" accept=".xlsx, .xls, .csv" onChange={handleFileUpload} />
+                                        {loading && <p className="text-blue-500 mt-2">載入中...</p>}
+                                        {error && <p className="text-red-500 mt-2">{error}</p>}
+                                    </label>
+                                </div>
+                            )}
+                            
+                            {step === 2 && (
+                                <div className="animate-modal">
+                                    <h2 className="text-2xl font-bold text-slate-800 text-center mb-8">2. 選擇負責導師與學生</h2>
+                                    <div className="grid md:grid-cols-2 gap-6 max-w-4xl mx-auto">
+                                        <div className="bg-[#F8FAFC] border border-slate-200 rounded-2xl p-6">
+                                            <h3 className="text-lg font-bold text-slate-700 mb-4">導師身份 (SCCW)</h3>
+                                            <select value={selectedTeacher} onChange={handleTeacherChange} className="w-full p-3 border border-slate-300 rounded-xl font-semibold text-slate-700 bg-white cursor-pointer">
+                                                {availableTeachers.map((t, idx) => <option key={idx} value={t}>{t}</option>)}
+                                            </select>
+                                        </div>
+                                        <div className="bg-[#F8FAFC] border border-slate-200 rounded-2xl p-6">
+                                            <h3 className="text-lg font-bold text-slate-700 mb-4">選擇學生名單</h3>
+                                            <div className="max-h-56 overflow-y-auto pr-2 custom-scrollbar flex flex-wrap gap-2">
+                                                {availableStudents.map((student, idx) => (
+                                                    <button key={idx} onClick={() => toggleStudent(student)} className={`px-4 py-2 rounded-full font-semibold text-sm transition-all border ${selectedStudents.includes(student) ? 'bg-[#5C8374] text-white border-[#5C8374]' : 'bg-white text-slate-600 border-slate-300'}`}>
+                                                        {student}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="mt-10 flex justify-center space-x-4">
+                                        <button onClick={() => setStep(1)} className="px-6 py-3 rounded-xl font-bold text-slate-500 bg-white border border-slate-200 btn-hover shadow-sm">返回上傳</button>
+                                        <button onClick={generateSchedule} className="px-8 py-3 rounded-xl font-bold text-white bg-[#4A90E2] btn-hover shadow-sm">生成時間表</button>
+                                    </div>
+                                </div>
+                            )}
+                            
+                            {step === 3 && scheduleData && (
+                                <div className="animate-modal">
+                                    <div className="flex justify-center space-x-3 mb-6">
+                                        <button onClick={generateParentMessages} className="bg-[#4A90E2] text-white font-bold py-2.5 px-6 rounded-lg text-sm btn-hover shadow-sm flex items-center gap-2">
+                                            <span>💬</span> 家長訊息
+                                        </button>
+                                        
+                                        <div className="relative dropdown group">
+                                            <button className={`flex items-center gap-2 bg-indigo-600 text-white font-bold py-2.5 px-6 rounded-lg text-sm btn-hover shadow-sm ${isExporting ? 'opacity-80' : ''}`} disabled={isExporting}>
+                                                <span>{isExporting ? '⏳ 匯出中...' : '📥'}</span> {isExporting ? '匯出中...' : '匯出選項 ▼'}
+                                            </button>
+                                            <div className="dropdown-content absolute left-0 top-full pt-2 w-48 z-50">
+                                                <div className="bg-white border border-slate-200 rounded-lg shadow-xl overflow-hidden">
+                                                    <button onClick={() => handleExport('word')} className="w-full text-left px-4 py-3 hover:bg-slate-50 text-slate-700 font-bold border-b border-slate-100 flex items-center space-x-3">
+                                                        <span>📄</span><span>Word (.doc)</span>
+                                                    </button>
+                                                    <button onClick={() => handleExport('excel')} className="w-full text-left px-4 py-3 hover:bg-slate-50 text-slate-700 font-bold border-b border-slate-100 flex items-center space-x-3">
+                                                        <span>📊</span><span>Excel (.xlsx)</span>
+                                                    </button>
+                                                    <button onClick={() => handleExport('pdf')} className="w-full text-left px-4 py-3 hover:bg-slate-50 text-slate-700 font-bold border-b border-slate-100 flex items-center space-x-3">
+                                                        <span>📕</span><span>PDF (.pdf)</span>
+                                                    </button>
+                                                    <button onClick={() => handleExport('jpg')} className="w-full text-left px-4 py-3 hover:bg-slate-50 text-slate-700 font-bold flex items-center space-x-3">
+                                                        <span>🖼️</span><span>JPG 圖檔</span>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <button onClick={() => setStep(2)} className="bg-slate-100 text-slate-600 border border-slate-200 font-bold py-2.5 px-6 rounded-lg text-sm btn-hover shadow-sm flex items-center gap-2">
+                                            <span>⬅</span> 返回修改
+                                        </button>
+                                    </div>
+                                    
+                                    <div id="visual-schedule" className="bg-white p-6 rounded-2xl border border-slate-200 overflow-x-auto relative">
+                                        <div className="text-2xl font-bold text-center text-slate-800 mb-8 border-b-2 border-[#D4AF37] pb-4">{selectedMonth}月 {selectedTeacher} 訓練時間表</div>
+                                        {scheduleData.map((week, weekIdx) => (
+                                            <div key={weekIdx} className="w-full min-w-[800px] mb-8 grid grid-cols-5 gap-3">
+                                                {week.map((dayObj, dayIdx) => (
+                                                    <div key={dayIdx} className={`bg-white border rounded-xl p-3 min-h-[140px] ${dayObj ? dayBorderColors[dayIdx] : 'border-slate-100'}`}>
+                                                        <div className="font-bold text-sm text-slate-600 border-b border-dashed border-slate-200 pb-2 mb-2 text-center">{dayObj ? dayObj.displayDate : ''}</div>
+                                                        <div className="space-y-2">{dayObj?.events.map((ev, evIdx) => <div key={evIdx} className={`text-xs p-1.5 rounded ${ev.isHighlight ? 'bg-[#FFFBEB] font-bold text-[#92400E]' : 'bg-[#F8FAFC]'}`}>{ev.text}</div>)}</div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ))}
+                                    </div>
+
+                                    <div className="hidden absolute left-[-9999px]">
+                                        <table id="export-table" style={{ borderCollapse: 'collapse', width: '100%', fontFamily: 'sans-serif' }}>
+                                            <thead>
+                                                <tr>
+                                                    <th colSpan={5} style={{ fontSize: '18px', fontWeight: 'bold', padding: '10px', textAlign: 'center', borderBottom: '2px solid #000' }}>
+                                                        {selectedMonth}月 {selectedTeacher} 訓練時間表
+                                                    </th>
+                                                </tr>
+                                                <tr>
+                                                    <th style={{ border: '1px solid #ccc', padding: '8px' }}>星期一</th>
+                                                    <th style={{ border: '1px solid #ccc', padding: '8px' }}>星期二</th>
+                                                    <th style={{ border: '1px solid #ccc', padding: '8px' }}>星期三</th>
+                                                    <th style={{ border: '1px solid #ccc', padding: '8px' }}>星期四</th>
+                                                    <th style={{ border: '1px solid #ccc', padding: '8px' }}>星期五</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {scheduleData.map((week, weekIdx) => (
+                                                    <tr key={weekIdx}>
+                                                        {week.map((dayObj, dayIdx) => (
+                                                            <td key={dayIdx} style={{ verticalAlign: 'top', border: '1px solid #ccc', padding: '8px', minWidth: '150px' }}>
+                                                                {dayObj ? (
+                                                                    <>
+                                                                        <div style={{ fontWeight: 'bold', borderBottom: '1px dashed #ccc', paddingBottom: '4px', marginBottom: '8px', textAlign: 'center' }}>
+                                                                            {dayObj.displayDate}
+                                                                        </div>
+                                                                        {dayObj.events.map((ev, evIdx) => (
+                                                                            <div key={evIdx} style={{ marginBottom: '6px', fontSize: '12px', padding: '4px', backgroundColor: ev.isHighlight ? '#FFFBEB' : '#F8FAFC', borderRadius: '4px' }}>
+                                                                                {ev.text}
+                                                                            </div>
+                                                                        ))}
+                                                                    </>
+                                                                ) : null}
+                                                            </td>
+                                                        ))}
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                    
+                    {showMsgModal && (
+                        <div className="fixed inset-0 bg-slate-900 bg-opacity-60 flex items-center justify-center z-[100] p-4 animate-modal">
+                            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col overflow-hidden">
+                                <div className="bg-[#2C3E50] p-5 text-white flex justify-between items-center">
+                                    <h3 className="text-xl font-bold">💬 家長訊息自動生成</h3>
+                                    <button onClick={() => setShowMsgModal(false)} className="text-white text-2xl hover:text-slate-300">&times;</button>
+                                </div>
+                                <div className="flex flex-1 overflow-hidden p-6">
+                                    <div className="w-1/3 overflow-y-auto pr-4 custom-scrollbar">
+                                        {Object.keys(parentMessages).map(student => (
+                                            <button key={student} onClick={() => setActiveMsgTab(student)} className={`w-full p-3 rounded-lg mb-2 text-left font-bold transition-colors ${activeMsgTab === student ? 'bg-[#4A90E2] text-white' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'}`}>{student}</button>
+                                        ))}
+                                    </div>
+                                    <div className="w-2/3 flex flex-col pl-4 border-l border-slate-100">
+                                        <textarea readOnly value={parentMessages[activeMsgTab] || ''} className="flex-1 w-full p-4 bg-slate-50 border border-slate-200 rounded-lg mb-4 resize-none focus:outline-none focus:ring-2 focus:ring-[#4A90E2] whitespace-pre-wrap font-sans text-slate-700" />
+                                        <button id="copyBtn" onClick={copyToClipboard} className="bg-[#5C8374] hover:bg-[#4a6b5e] text-white py-3 rounded-lg font-bold transition-all shadow-sm flex items-center justify-center gap-2">
+                                            <span>📋</span> 一鍵複製到 WhatsApp
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
