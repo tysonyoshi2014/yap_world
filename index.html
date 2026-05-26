@@ -51,6 +51,47 @@
     <script type="text/babel">
         const { useState } = React;
 
+        // 【設定】同義詞庫，解決同一人多種寫法的問題
+        const STUDENT_ALIASES = {
+            'TAKLIM': 'TAKLIM林明',
+            '林明': 'TAKLIM林明',
+            '林明TAKLIM': 'TAKLIM林明'
+        };
+
+        const getNormalizedName = (rawName) => {
+            const clean = rawName.toUpperCase();
+            return STUDENT_ALIASES[clean] || clean;
+        };
+
+        // 【設定】導師預設名單
+        const defaultYan = ['鄧芷妤', '溫晟希', '李彥樂', 'ETHAN', '蔡曉曈', 'FELICIA', 'NAGATA'].map(s => s.toUpperCase());
+        const defaultHo = ['AYAAN', 'HERRICK', 'NATHAN', 'TAKLIM林明', '黃耀樟', '阮美琪'].map(s => s.toUpperCase());
+        const defaultGao = ['古智杰', '朱梓辰', '江晉鋒', '黃焌傑', '徐梓弦', '古嘉朗'].map(s => s.toUpperCase());
+
+        // 【更新】智能修復名字中間的異常空格 (改為精準修復，不影響其他人)
+        const fixNameSpaces = (rawStr) => {
+            let res = rawStr;
+            
+            // 1. 針對英文名字被單一字母隔開的情況 (解決 H ERRICK 等問題)
+            res = res.replace(/\b([A-Z])\s+([A-Z]{2,})\b/g, '$1$2');
+            
+            // 2. 白名單精準修復：只針對我們預設知道的學生名單進行去空格
+            const knownList = [...defaultYan, ...defaultHo, ...defaultGao, 'TAKLIM', '林明', 'TAKLIM林明'];
+            
+            // 按名字長度排序 (長的優先處理)
+            knownList.sort((a, b) => b.length - a.length);
+
+            knownList.forEach(name => {
+                if (name.length < 2) return;
+                // 將 "溫晟希" 轉成正則表達式 "溫\s*晟\s*希"
+                // 這樣不管是 "溫晟希"、"溫 晟希" 還是 "溫 晟 希" 都會被完美還原成 "溫晟希"
+                const regexStr = name.split('').join('\\s*');
+                const regex = new RegExp(regexStr, 'g');
+                res = res.replace(regex, name);
+            });
+            return res;
+        };
+
         const App = () => {
             const [step, setStep] = useState(1); 
             const [rawExcelData, setRawExcelData] = useState({ data: null, headers: null, headerRowIndex: -1 });
@@ -71,9 +112,19 @@
             const [showMsgModal, setShowMsgModal] = useState(false);
             const [parentMessages, setParentMessages] = useState({});
             const [activeMsgTab, setActiveMsgTab] = useState('');
+            const [msgLanguage, setMsgLanguage] = useState('zh');
 
-            const default7 = ['鄧芷妤', '溫晟希', '李彥樂', 'ETHAN', '蔡曉曈', 'FELICIA', 'NAGATA'].map(s => s.toUpperCase());
-            const targetTeacherCol = 'SCCW(陳) YAN';
+            const getAutoSelectedStudents = (teacherName, allStudentsList) => {
+                const cleanT = teacherName.replace(/\s+/g, '').toUpperCase();
+                if (cleanT.includes('SCCW(陳)') || cleanT.includes('YAN')) {
+                    return allStudentsList.filter(s => defaultYan.includes(s));
+                } else if (cleanT.includes('SCCW(何)')) {
+                    return allStudentsList.filter(s => defaultHo.includes(s));
+                } else if (cleanT.includes('SCCW(高)')) {
+                    return allStudentsList.filter(s => defaultGao.includes(s));
+                }
+                return [];
+            };
 
             const handleFileUpload = (e) => {
                 const file = e.target.files[0];
@@ -128,7 +179,6 @@
                     return;
                 }
 
-                // 修改：支援抓取所有負責老師與治療師
                 let teachers = headers.slice(2)
                                       .map(h => String(h).trim())
                                       .filter(h => {
@@ -141,7 +191,6 @@
                 
                 teachers = [...new Set(teachers)];
 
-                // 自訂排序邏輯：SCCW -> ST -> OT -> PT -> SW
                 const getTeacherRank = (name) => {
                     const clean = name.toUpperCase().replace(/[\s\n\r　]+/g, '');
                     if (clean.includes('SCCW')) return 1;
@@ -153,18 +202,16 @@
                 };
 
                 teachers.sort((a, b) => {
-                    if (a === targetTeacherCol) return -1;
-                    if (b === targetTeacherCol) return 1;
                     const rankA = getTeacherRank(a);
                     const rankB = getTeacherRank(b);
                     if (rankA !== rankB) return rankA - rankB;
-                    return a.localeCompare(b); // 同類型按字母排序
+                    return a.localeCompare(b); 
                 });
 
                 setAvailableTeachers(teachers);
 
                 let sSet = new Set();
-                const ignoredKeywords = ['ST','OT','PT','SCCW','SSCCW','SW','YAN','小組','家長','觀課','請假','ABS','(高)','(陳)','(李)','(敖)','(勞)','(魯)','(張)','(何)', '斑馬', '猴子', '青蛙', '海豚', '熊貓', '獅子', '企鵝', '大象', '長頸鹿', '白兔', '河馬', '松鼠', 'XXX', '小小運動會', '組'];
+                const ignoredKeywords = ['ST','OT','PT','SCCW','SSCCW','SW','YAN','小組','家長','觀課','請假','ABS','(高)','(陳)','(李)','(何)','(敖)','(勞)','(魯)','(張)', '斑馬', '猴子', '青蛙', '海豚', '熊貓', '獅子', '企鵝', '大象', '長頸鹿', '白兔', '河馬', '松鼠', 'XXX', '小小運動會', '組'];
                 
                 for (let i = headerRowIndex + 1; i < data.length; i++) {
                     const row = data[i];
@@ -174,12 +221,16 @@
                         if (!cellValueRaw) continue;
                         
                         let cleanStr = String(cellValueRaw).replace(/[\(（\[【]?(補課|補)[\)）\]】]?/g, '').replace(/\*/g, '').toUpperCase();
+                        
+                        // 【執行智能空格修復】在分割字串前，先修復已知名字中間的誤打空格
+                        cleanStr = fixNameSpaces(cleanStr);
+
                         let parts = cleanStr.split(/[\s\n/、,+　]+/);
                         
                         parts.forEach(p => {
                             let name = p.trim();
                             if (name.length >= 2 && !name.match(/^[0-9:.\-]+$/) && !name.match(/^S\d+$/i) && !ignoredKeywords.some(ig => name.includes(ig))) {
-                                sSet.add(name);
+                                sSet.add(getNormalizedName(name));
                             }
                         });
                     }
@@ -188,13 +239,18 @@
                 const allStudents = Array.from(sSet).sort();
                 setAvailableStudents(allStudents);
 
-                if (teachers.includes(targetTeacherCol)) {
-                    setSelectedTeacher(targetTeacherCol);
-                    const preSelected = allStudents.filter(s => default7.includes(s));
-                    setSelectedStudents(preSelected);
-                } else if (teachers.length > 0) {
-                    setSelectedTeacher(teachers[0]);
-                    setSelectedStudents([]); 
+                if (teachers.length > 0) {
+                    let initialTeacher = teachers[0];
+                    const yanTeacher = teachers.find(t => t.replace(/\s+/g, '').toUpperCase().includes('SCCW(陳)'));
+                    const hoTeacher = teachers.find(t => t.replace(/\s+/g, '').toUpperCase().includes('SCCW(何)'));
+                    const gaoTeacher = teachers.find(t => t.replace(/\s+/g, '').toUpperCase().includes('SCCW(高)'));
+                    
+                    if (yanTeacher) initialTeacher = yanTeacher;
+                    else if (hoTeacher) initialTeacher = hoTeacher;
+                    else if (gaoTeacher) initialTeacher = gaoTeacher;
+
+                    setSelectedTeacher(initialTeacher);
+                    setSelectedStudents(getAutoSelectedStudents(initialTeacher, allStudents));
                 }
 
                 setRawExcelData({ data, headers, headerRowIndex });
@@ -205,13 +261,7 @@
             const handleTeacherChange = (e) => {
                 const newTeacher = e.target.value;
                 setSelectedTeacher(newTeacher);
-
-                if (newTeacher === targetTeacherCol) {
-                    const preSelected = availableStudents.filter(s => default7.includes(s));
-                    setSelectedStudents(preSelected);
-                } else {
-                    setSelectedStudents([]);
-                }
+                setSelectedStudents(getAutoSelectedStudents(newTeacher, availableStudents));
             };
 
             const toggleStudent = (studentName) => {
@@ -352,13 +402,20 @@
                         if (!cellValueRaw) continue;
 
                         const cellValueOriginal = String(cellValueRaw).toUpperCase();
+                        // 移除所有空格以作比對，確保配對百分百準確
                         const cellValueClean = cellValueOriginal.replace(/\s+/g, '');
                         if (!cellValueClean) continue;
 
                         let matchedStudentsInCell = [];
                         for (let student of selectedStudents) {
-                            let cleanStudent = student.toUpperCase().replace(/\s+/g, '');
-                            if (cellValueClean.includes(cleanStudent)) {
+                            let searchTerms = [student];
+                            if (student === 'TAKLIM林明') {
+                                searchTerms = ['TAKLIM林明', '林明TAKLIM', 'TAKLIM', '林明'];
+                            }
+
+                            let isMatch = searchTerms.some(term => cellValueClean.includes(term.replace(/\s+/g, '')));
+                            
+                            if (isMatch) {
                                 matchedStudentsInCell.push(student);
                             }
                         }
@@ -381,7 +438,10 @@
                             const isHighlight = cleanRawHeader === cleanSelectedTeacher;
 
                             for (let matchedStudent of matchedStudentsInCell) {
-                                const formatName = (name) => name.length > 3 && name.match(/^[A-Z]+$/) ? name.charAt(0) + name.slice(1).toLowerCase() : name;
+                                const formatName = (name) => {
+                                    if(name === 'TAKLIM林明') return 'TAKLIM林明';
+                                    return name.length > 3 && name.match(/^[A-Z]+$/) ? name.charAt(0) + name.slice(1).toLowerCase() : name;
+                                };
                                 const displayName = formatName(matchedStudent);
                                 const finalName = hasMakeup ? `(補)${displayName}` : displayName;
 
@@ -406,7 +466,6 @@
                 let lastDowIdx = -1;
 
                 for (const day of daysList) {
-                    // 修改：只要這天有日期或星期，即使沒有課堂也保留它 (讓沒課的日子顯示出來)
                     if (day.events.length === 0 && !day.displayDate && day.dowIdx === -1) continue; 
                     if (day.dowIdx === 5 || day.dowIdx === 6) continue;
 
@@ -436,7 +495,6 @@
                     gridWeeks.push(currentGridWeek);
                 }
 
-                // 修改：整週即使沒課，只要有日子存在就列出
                 const finalWeeks = gridWeeks.filter(week => week.some(d => d !== null));
 
                 setScheduleData(finalWeeks);
@@ -445,6 +503,7 @@
             };
 
             const formatParentName = (name) => {
+                if (name === 'TAKLIM林明') return 'Taklim / 林明'; 
                 let clean = name.replace(/[\(（\[【]?(補課|補)[\)）\]】]?/g, '').trim();
                 if (/^[A-Za-z\s]+$/.test(clean)) {
                     return clean.length > 3 ? clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase() : clean;
@@ -457,6 +516,9 @@
 
             const generateParentMessages = () => {
                 let msgs = {};
+                
+                const monthNamesEn = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+                const engMonth = monthNamesEn[selectedMonth - 1];
                 
                 selectedStudents.forEach(student => {
                     let studentEvents = [];
@@ -484,33 +546,43 @@
                     }
 
                     if (studentEvents.length === 0) {
-                        msgs[student] = "此學生本月暫無被安排的訓練課堂。";
+                        msgs[student] = {
+                            zh: "此學生本月暫無被安排的訓練課堂。",
+                            en: "There are no scheduled training sessions for this student this month."
+                        };
                         return;
                     }
 
-                    let msgText = `親愛的${formatParentName(student)}家長，\n你好😊以下是${selectedMonth}月份的學童訓練時間:\n\n`;
+                    let zhMsgText = `親愛的${formatParentName(student)}家長，\n你好😊以下是${selectedMonth}月份的學童訓練時間:\n\n`;
+                    let enMsgText = `Dear parents of ${formatParentName(student)},\nHello😊 Here is the training schedule for ${engMonth}:\n\n`;
 
                     studentEvents.forEach(ev => {
                         let dateParts = ev.date.split('/');
                         let formattedDate = dateParts.length === 2 ? `${dateParts[0]}/${dateParts[1]}/${ev.year}` : ev.date;
                         
-                        let therapyName = '';
-                        if (ev.type === 'OT') therapyName = '職業治療師訓練';
-                        else if (ev.type === 'PT') therapyName = '物理治療師訓練';
-                        else if (ev.type === 'ST') therapyName = '言語治療師訓練';
-                        else if (ev.type === 'SCCW') therapyName = '老師訓練';
-                        else if (ev.type === 'SW') therapyName = '社工訓練';
-                        else therapyName = ev.type + '訓練';
+                        let zhTherapyName = '';
+                        let enTherapyName = '';
 
-                        msgText += `${formattedDate}\n${ev.time}${therapyName}${ev.isStar ? '*' : ''}\n\n`;
+                        if (ev.type === 'OT') { zhTherapyName = '職業治療師訓練'; enTherapyName = 'Occupational Therapy'; }
+                        else if (ev.type === 'PT') { zhTherapyName = '物理治療師訓練'; enTherapyName = 'Physiotherapy'; }
+                        else if (ev.type === 'ST') { zhTherapyName = '言語治療師訓練'; enTherapyName = 'Speech Therapy'; }
+                        else if (ev.type === 'SCCW') { zhTherapyName = '老師訓練'; enTherapyName = "Teacher's Training"; }
+                        else if (ev.type === 'SW') { zhTherapyName = '社工訓練'; enTherapyName = 'Social Worker Session'; }
+                        else { zhTherapyName = ev.type + '訓練'; enTherapyName = ev.type + ' Training'; }
+
+                        zhMsgText += `${formattedDate}\n${ev.time}${zhTherapyName}${ev.isStar ? '*' : ''}\n\n`;
+                        enMsgText += `${formattedDate}\n${ev.time} ${enTherapyName}${ev.isStar ? '*' : ''}\n\n`;
                     });
 
                     if (hasStarInMonth) {
-                        msgText += `標註了 “*” 的日子，家長可陪同學童一起出席訓練😊\n學童需按時出席已安排日子的訓練😊\n\n`;
+                        zhMsgText += `標註了 “*” 的日子，家長可陪同學童一起出席訓練😊\n學童需按時出席已安排日子的訓練😊\n\n`;
+                        enMsgText += `For the dates marked with "*", parents are welcome to accompany their child to the training😊\nPlease ensure your child attends the scheduled training sessions on time😊\n\n`;
                     }
 
-                    msgText += `❓如家長對以上內容有任何查詢，請致電2126 7600與班主任聯絡，謝謝🙏🏻`;
-                    msgs[student] = msgText;
+                    zhMsgText += `❓如家長對以上內容有任何查詢，請致電2126 7600與班主任聯絡，謝謝🙏🏻`;
+                    enMsgText += `❓If you have any inquiries regarding the above schedule, please contact the class teacher at 2126 7600. Thank you🙏🏻`;
+                    
+                    msgs[student] = { zh: zhMsgText, en: enMsgText };
                 });
 
                 setParentMessages(msgs);
@@ -519,7 +591,7 @@
             };
 
             const copyToClipboard = () => {
-                const textToCopy = parentMessages[activeMsgTab] || '';
+                const textToCopy = parentMessages[activeMsgTab]?.[msgLanguage] || '';
                 const textArea = document.createElement("textarea");
                 textArea.value = textToCopy;
                 textArea.style.position = "fixed";
@@ -702,7 +774,6 @@
                                     <div id="visual-schedule" className="bg-white p-6 rounded-2xl border border-slate-200 overflow-x-auto relative">
                                         <div className="text-2xl font-bold text-center text-slate-800 mb-6 border-b-2 border-[#D4AF37] pb-4">{selectedMonth}月 {selectedTeacher} 訓練時間表</div>
                                         
-                                        {/* 新增：星期一至星期五的頂部表頭 */}
                                         <div className="w-full min-w-[800px] mb-3 grid grid-cols-5 gap-3">
                                             {['星期一', '星期二', '星期三', '星期四', '星期五'].map((dayName, idx) => (
                                                 <div key={idx} className={`font-bold text-center py-2.5 rounded-xl border ${dayBorderColors[idx]} ${dayColors[idx]} text-slate-700 shadow-sm`}>
@@ -782,7 +853,22 @@
                                         ))}
                                     </div>
                                     <div className="w-2/3 flex flex-col pl-4 border-l border-slate-100">
-                                        <textarea readOnly value={parentMessages[activeMsgTab] || ''} className="flex-1 w-full p-4 bg-slate-50 border border-slate-200 rounded-lg mb-4 resize-none focus:outline-none focus:ring-2 focus:ring-[#4A90E2] whitespace-pre-wrap font-sans text-slate-700" />
+                                        <div className="flex space-x-2 mb-4 bg-slate-100 p-1.5 rounded-lg self-start">
+                                            <button 
+                                                onClick={() => setMsgLanguage('zh')}
+                                                className={`px-5 py-2 rounded-md text-sm font-bold transition-all ${msgLanguage === 'zh' ? 'bg-white text-[#4A90E2] shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                            >
+                                                中文
+                                            </button>
+                                            <button 
+                                                onClick={() => setMsgLanguage('en')}
+                                                className={`px-5 py-2 rounded-md text-sm font-bold transition-all ${msgLanguage === 'en' ? 'bg-white text-[#4A90E2] shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                            >
+                                                English
+                                            </button>
+                                        </div>
+
+                                        <textarea readOnly value={parentMessages[activeMsgTab]?.[msgLanguage] || ''} className="flex-1 w-full p-4 bg-slate-50 border border-slate-200 rounded-lg mb-4 resize-none focus:outline-none focus:ring-2 focus:ring-[#4A90E2] whitespace-pre-wrap font-sans text-slate-700 text-[15px] leading-relaxed" />
                                         <button id="copyBtn" onClick={copyToClipboard} className="bg-[#5C8374] hover:bg-[#4a6b5e] text-white py-3 rounded-lg font-bold transition-all shadow-sm flex items-center justify-center gap-2">
                                             <span>📋</span> 一鍵複製到 WhatsApp
                                         </button>
