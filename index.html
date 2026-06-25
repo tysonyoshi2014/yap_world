@@ -295,11 +295,18 @@
                 }
             };
 
-            const formatTime = (h, m) => {
-                if (h >= 18) h -= 12; 
-                if (h >= 1 && h <= 7) h += 12; 
+            // 【終極安全修復：更穩定的時間引擎】
+            const formatTime = (rawH, m) => {
+                let h = rawH;
+                // 只有輸入 1 到 6 時，才自動視為下午 13 到 18 點，防止 19:00 被錯誤扣除
+                if (h >= 1 && h <= 6) {
+                    h += 12; 
+                }
+                
                 let mins = h * 60 + m;
-                let h12 = h > 12 ? h - 12 : (h === 0 ? 12 : h);
+                let h12 = h % 12;
+                if (h12 === 0) h12 = 12; // 處理 12:00 或 00:00 的情況
+                
                 return { mins, label: `${h12}:${m.toString().padStart(2, '0')}` };
             };
 
@@ -313,14 +320,23 @@
                 }
                 let str = String(rawTime).split('-')[0].replace(/[^0-9:.]/g, '');
                 if (!str) return null;
+                
+                // 處理 "9:30", "09.30"
                 let match = str.match(/(\d{1,2})[:.](\d{2})/);
                 if (match) return formatTime(parseInt(match[1], 10), parseInt(match[2], 10));
+                
+                // 處理 "0930", "930"
                 let numMatch = str.match(/^(\d{3,4})$/);
                 if (numMatch) {
                     let h = parseInt(numMatch[1].length === 3 ? numMatch[1].slice(0, 1) : numMatch[1].slice(0, 2), 10);
                     let m = parseInt(numMatch[1].slice(-2), 10);
                     return formatTime(h, m);
                 }
+                
+                // 處理純小時 "10" 或 "11"
+                let hourMatch = str.match(/^(\d{1,2})$/);
+                if (hourMatch) return formatTime(parseInt(hourMatch[1], 10), 0);
+                
                 return null;
             };
 
@@ -421,20 +437,22 @@
                         if (!cellValueRaw) continue;
 
                         const cellValueOriginal = String(cellValueRaw).toUpperCase();
-                        const cellValueClean = cellValueOriginal.replace(/\s+/g, '');
-                        if (!cellValueClean) continue;
+                        
+                        // 精準分詞與全局別名解析 (已確認邏輯穩固)
+                        let cleanStrForMatch = cellValueOriginal.replace(/[\(（\[【]?(補課|補)[\)）\]】]?/g, '').replace(/\*/g, '');
+                        cleanStrForMatch = fixNameSpaces(cleanStrForMatch);
+                        let cellParts = cleanStrForMatch.split(/[\s\n/、,+　]+/);
 
                         let matchedStudentsInCell = [];
-                        for (let student of selectedStudents) {
-                            let searchTerms = [student];
-                            if (student === 'TAKLIM林明') {
-                                searchTerms = ['TAKLIM林明', '林明TAKLIM', 'TAKLIM', '林明'];
-                            }
-
-                            let isMatch = searchTerms.some(term => cellValueClean.includes(term.replace(/\s+/g, '')));
-                            
-                            if (isMatch) {
-                                matchedStudentsInCell.push(student);
+                        
+                        for (let p of cellParts) {
+                            let name = p.trim();
+                            if (name.length >= 2) {
+                                let normalizedName = getNormalizedName(name);
+                                
+                                if (selectedStudents.includes(normalizedName) && !matchedStudentsInCell.includes(normalizedName)) {
+                                    matchedStudentsInCell.push(normalizedName);
+                                }
                             }
                         }
 
@@ -661,26 +679,20 @@
                     document.body.removeChild(link);
                     
                 } else if (type === 'excel') {
-                    // 【升級】使用 xlsx-js-style 構建帶有排版格式的 Excel
                     const aoa = [];
                     
-                    // 1. 插入大標題
                     aoa.push([`${selectedMonth}月 ${selectedTeacher} 訓練時間表`, "", "", "", ""]);
-                    
-                    // 2. 插入星期標題
                     aoa.push(['星期一', '星期二', '星期三', '星期四', '星期五']);
                     
-                    // 3. 組合數據（使用 \n 進行換行）
                     if (scheduleData && scheduleData.length > 0) {
                         scheduleData.forEach(week => {
                             const rowData = [];
                             week.forEach(dayObj => {
                                 if (dayObj) {
-                                    // 日期和事件之間加入換行
                                     let cellText = dayObj.displayDate + '\n'; 
                                     if (dayObj.events && dayObj.events.length > 0) {
                                         const eventTexts = dayObj.events.map(ev => ev.text);
-                                        cellText += eventTexts.join('\n'); // 每個事件之間用 \n 換行
+                                        cellText += eventTexts.join('\n');
                                     }
                                     rowData.push(cellText);
                                 } else {
@@ -693,16 +705,14 @@
 
                     const ws = XLSX.utils.aoa_to_sheet(aoa);
 
-                    // 【核心修復】自動為所有資料格套用「自動換行 (Wrap Text)」和「加框線」樣式
                     const range = XLSX.utils.decode_range(ws['!ref']);
                     for (let R = range.s.r; R <= range.e.r; ++R) {
                         for (let C = range.s.c; C <= range.e.c; ++C) {
                             const cellRef = XLSX.utils.encode_cell({r: R, c: C});
-                            if (!ws[cellRef]) ws[cellRef] = { v: "", t: "s" }; // 確保空白格也有框線
+                            if (!ws[cellRef]) ws[cellRef] = { v: "", t: "s" }; 
                             
-                            // 基本樣式 (字體置上、啟用自動換行、畫上灰色框線)
                             let cellStyle = {
-                                alignment: { wrapText: true, vertical: "top" }, // <-- 強制換行的關鍵
+                                alignment: { wrapText: true, vertical: "top" }, 
                                 border: {
                                     top: { style: "thin", color: { rgb: "CCCCCC" } },
                                     bottom: { style: "thin", color: { rgb: "CCCCCC" } },
@@ -712,27 +722,22 @@
                             };
 
                             if (R === 0) {
-                                // 第 0 列是大標題
                                 cellStyle.alignment = { horizontal: "center", vertical: "center" };
                                 cellStyle.font = { sz: 16, bold: true };
-                                cellStyle.border = {}; // 大標題不需要外框線
+                                cellStyle.border = {}; 
                             } else if (R === 1) {
-                                // 第 1 列是星期幾 (表頭)
                                 cellStyle.alignment = { horizontal: "center", vertical: "center" };
                                 cellStyle.font = { bold: true };
-                                cellStyle.fill = { fgColor: { rgb: "F1F5F9" } }; // 加上淡淡的藍灰底色
+                                cellStyle.fill = { fgColor: { rgb: "F1F5F9" } }; 
                             }
 
-                            // 賦予樣式給該儲存格
                             ws[cellRef].s = cellStyle;
                         }
                     }
 
-                    // 合併第一列大標題
                     if (!ws['!merges']) ws['!merges'] = [];
                     ws['!merges'].push({ s: {r:0, c:0}, e: {r:0, c:4} });
 
-                    // 設定更寬的欄寬 (適應長名字)
                     ws['!cols'] = [{wch: 32}, {wch: 32}, {wch: 32}, {wch: 32}, {wch: 32}];
 
                     const wb = XLSX.utils.book_new();
